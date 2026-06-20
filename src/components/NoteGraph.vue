@@ -41,9 +41,9 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
+import { ref, onMounted, onBeforeUnmount, watch, nextTick, markRaw } from 'vue'
 import * as d3 from 'd3'
-import type { GraphData, NoteNode } from '../api'
+import type { GraphData, NoteNode, NoteLink } from '../api'
 
 interface Props {
   data: GraphData | null
@@ -71,7 +71,7 @@ interface SimNode extends d3.SimulationNodeDatum {
   path: string
   modTime: number
   links: string[]
-  linkFrom?: string[]
+  linkFrom: string[]
   degree: number
 }
 
@@ -86,222 +86,277 @@ let resizeObserver: ResizeObserver | null = null
 let width = 0
 let height = 0
 
-function getConnected(nodeId: string): Set<string> {
+let isRendering = false
+let cachedNodes: Record<string, SimNode> = {}
+let cachedLinks: Array<{ source: string; target: string }> = []
+
+function cloneLinksArr(arr: string[] | undefined): string[] {
+  if (!Array.isArray(arr)) return []
+  const out: string[] = new Array(arr.length)
+  for (let i = 0; i < arr.length; i++) out[i] = arr[i]
+  return out
+}
+
+function buildPlainNode(d: SimNode): NoteNode {
+  return {
+    id: d.id,
+    title: d.title,
+    path: d.path,
+    modTime: d.modTime,
+    links: cloneLinksArr(d.links),
+    linkFrom: cloneLinksArr(d.linkFrom),
+  }
+}
+
+function buildHoverNode(d: SimNode): NoteNode {
+  return {
+    id: d.id,
+    title: d.title,
+    path: d.path,
+    modTime: d.modTime,
+    links: cloneLinksArr(d.links),
+    linkFrom: cloneLinksArr(d.linkFrom),
+  }
+}
+
+function getConnectedLocal(nodeId: string): Set<string> {
   const set = new Set<string>([nodeId])
-  if (!props.data) return set
-  for (const link of props.data.links) {
-    if (link.source === nodeId) set.add(typeof link.target === 'string' ? link.target : link.target.id)
-    if (link.target === nodeId) set.add(typeof link.source === 'string' ? link.source : link.source.id)
+  for (const link of cachedLinks) {
+    if (link.source === nodeId) set.add(link.target)
+    if (link.target === nodeId) set.add(link.source)
   }
   return set
 }
 
 function renderGraph() {
+  if (isRendering) return
   if (!svgEl.value || !gZoom.value || !gLinks.value || !gNodes.value || !props.data) return
 
-  const svg = d3.select(svgEl.value)
-  const gZoomSel = d3.select(gZoom.value)
-  const gLinksSel = d3.select(gLinks.value)
-  const gNodesSel = d3.select(gNodes.value)
+  isRendering = true
 
-  gZoomSel.selectAll('*').remove()
-  if (simulation) {
-    simulation.stop()
-    simulation = null
-  }
+  try {
+    const svg = d3.select(svgEl.value)
+    const gZoomSel = d3.select(gZoom.value)
+    const gLinksSel = d3.select(gLinks.value)
+    const gNodesSel = d3.select(gNodes.value)
 
-  const nodeMap = new Map<string, SimNode>()
-  const simNodes: SimNode[] = props.data.nodes.map((n) => {
-    const degree = (n.links?.length || 0) + (n.linkFrom?.length || 0)
-    const node: SimNode = {
-      id: n.id,
-      title: n.title,
-      path: n.path,
-      modTime: n.modTime,
-      links: n.links,
-      linkFrom: n.linkFrom,
-      degree,
+    if (simulation) {
+      simulation.stop()
+      simulation = null
     }
-    nodeMap.set(n.id, node)
-    return node
-  })
 
-  const simLinks: SimLink[] = props.data.links.map((l) => ({
-    source: l.source,
-    target: l.target,
-  }))
+    gZoomSel.selectAll('*').remove()
 
-  if (simNodes.length === 0) return
+    cachedNodes = {}
+    cachedLinks = new Array(props.data.links.length)
+    for (let i = 0; i < props.data.links.length; i++) {
+      const l = props.data.links[i]
+      cachedLinks[i] = { source: l.source, target: l.target }
+    }
 
-  const minR = 5
-  const maxR = 24
-  const degrees = simNodes.map((n) => n.degree)
-  const minDeg = Math.min(...degrees)
-  const maxDeg = Math.max(...degrees)
-  const radiusScale = d3.scaleSqrt().domain([minDeg, Math.max(maxDeg, 1)]).range([minR, maxR])
+    const simNodes: SimNode[] = new Array(props.data.nodes.length)
+    for (let i = 0; i < props.data.nodes.length; i++) {
+      const n = props.data.nodes[i]
+      const links = cloneLinksArr(n.links)
+      const linkFrom = cloneLinksArr(n.linkFrom)
+      const degree = links.length + linkFrom.length
+      const node: SimNode = markRaw({
+        id: n.id,
+        title: n.title,
+        path: n.path,
+        modTime: n.modTime,
+        links,
+        linkFrom,
+        degree,
+      })
+      simNodes[i] = node
+      cachedNodes[n.id] = node
+    }
 
-  const colorScale = d3.scaleOrdinal<string, string>(d3.schemeTableau10)
+    const simLinks: SimLink[] = new Array(cachedLinks.length)
+    for (let i = 0; i < cachedLinks.length; i++) {
+      const l = cachedLinks[i]
+      simLinks[i] = { source: l.source, target: l.target }
+    }
 
-  simulation = d3
-    .forceSimulation<SimNode>(simNodes)
-    .force(
-      'link',
-      d3
-        .forceLink<SimNode, SimLink>(simLinks)
-        .id((d) => d.id)
-        .distance(100)
-        .strength(0.6)
-    )
-    .force('charge', d3.forceManyBody<SimNode>().strength(-350))
-    .force('center', d3.forceCenter(width / 2, height / 2))
-    .force('collision', d3.forceCollide<SimNode>().radius((d) => radiusScale(d.degree) + 4))
+    if (simNodes.length === 0) {
+      return
+    }
 
-  const linkSel = gLinksSel
-    .selectAll<SVGLineElement, SimLink>('line')
-    .data(simLinks)
-    .join('line')
-    .attr('stroke', '#3d4658')
-    .attr('stroke-opacity', 0.6)
-    .attr('stroke-width', 1.2)
-    .attr('marker-end', 'url(#arrowhead)')
+    const minR = 5
+    const maxR = 24
+    let minDeg = Infinity
+    let maxDeg = -Infinity
+    for (let i = 0; i < simNodes.length; i++) {
+      const d = simNodes[i].degree
+      if (d < minDeg) minDeg = d
+      if (d > maxDeg) maxDeg = d
+    }
+    if (maxDeg < 1) maxDeg = 1
+    const radiusScale = d3.scaleSqrt().domain([minDeg, maxDeg]).range([minR, maxR])
 
-  const nodeGroup = gNodesSel
-    .selectAll<SVGGElement, SimNode>('g.node')
-    .data(simNodes, (d) => d.id)
-    .join('g')
-    .attr('class', 'node')
-    .style('cursor', 'pointer')
-    .call(
-      d3
-        .drag<SVGGElement, SimNode>()
-        .on('start', (event, d) => {
-          if (!event.active) simulation?.alphaTarget(0.3).restart()
-          d.fx = d.x
-          d.fy = d.y
+    const colorScale = d3.scaleOrdinal<string, string>(d3.schemeTableau10)
+
+    simulation = d3
+      .forceSimulation<SimNode>(simNodes)
+      .force(
+        'link',
+        d3
+          .forceLink<SimNode, SimLink>(simLinks)
+          .id((d) => d.id)
+          .distance(110)
+          .strength(0.45)
+      )
+      .force('charge', d3.forceManyBody<SimNode>().strength(-320))
+      .force('center', d3.forceCenter(width / 2, height / 2))
+      .force(
+        'collision',
+        d3.forceCollide<SimNode>().radius((d) => radiusScale(d.degree) + 6)
+      )
+      .velocityDecay(0.55)
+      .alphaDecay(0.028)
+
+    const linkSel = gLinksSel
+      .selectAll<SVGLineElement, SimLink>('line')
+      .data(simLinks)
+      .join('line')
+      .attr('stroke', '#3d4658')
+      .attr('stroke-opacity', 0.55)
+      .attr('stroke-width', 1.2)
+      .attr('marker-end', 'url(#arrowhead)')
+
+    const nodeGroup = gNodesSel
+      .selectAll<SVGGElement, SimNode>('g.node')
+      .data(simNodes, (d) => d.id)
+      .join('g')
+      .attr('class', 'node')
+      .style('cursor', 'pointer')
+      .call(
+        d3
+          .drag<SVGGElement, SimNode>()
+          .on('start', (event, d) => {
+            if (!event.active) simulation?.alphaTarget(0.25).restart()
+            d.fx = d.x
+            d.fy = d.y
+          })
+          .on('drag', (event, d) => {
+            d.fx = event.x
+            d.fy = event.y
+          })
+          .on('end', (event, d) => {
+            if (!event.active) simulation?.alphaTarget(0)
+            d.fx = null
+            d.fy = null
+          })
+      )
+
+    nodeGroup
+      .append('circle')
+      .attr('r', (d) => radiusScale(d.degree))
+      .attr('fill', (d) => {
+        return colorScale(d.id)
+      })
+      .attr('stroke', '#1a1d24')
+      .attr('stroke-width', 1.5)
+      .attr('opacity', 0.92)
+
+    nodeGroup
+      .append('text')
+      .text((d) => d.title)
+      .attr('text-anchor', 'middle')
+      .attr('dy', (d) => -radiusScale(d.degree) - 6)
+      .attr('fill', '#c8cfdb')
+      .attr('font-size', '11px')
+      .attr('font-weight', '500')
+      .attr('pointer-events', 'none')
+      .style('text-shadow', '0 1px 2px rgba(0,0,0,0.8)')
+
+    let currentSelected: string | null = props.selectedId
+
+    function updateHighlight(selected: string | null) {
+      currentSelected = selected
+      const connected = selected ? getConnectedLocal(selected) : null
+      nodeGroup
+        .select('circle')
+        .attr('opacity', (d) => {
+          if (!selected) return 0.92
+          return connected!.has(d.id) ? 1 : 0.15
         })
-        .on('drag', (event, d) => {
-          d.fx = event.x
-          d.fy = event.y
-        })
-        .on('end', (event, d) => {
-          if (!event.active) simulation?.alphaTarget(0)
-          d.fx = null
-          d.fy = null
-        })
-    )
+        .attr('stroke', (d) => (d.id === selected ? '#ffffff' : '#1a1d24'))
+        .attr('stroke-width', (d) => (d.id === selected ? 3 : 1.5))
 
-  nodeGroup
-    .append('circle')
-    .attr('r', (d) => radiusScale(d.degree))
-    .attr('fill', (d) => {
-      const bucket = Math.floor(colorScale.domain().indexOf(d.id) % 10)
-      return bucket >= 0 ? colorScale(d.id) : '#7aa2f7'
+      nodeGroup
+        .select('text')
+        .attr('opacity', (d) => {
+          if (!selected) return 1
+          return connected!.has(d.id) ? 1 : 0.2
+        })
+
+      linkSel
+        .attr('stroke-opacity', (d) => {
+          if (!selected) return 0.55
+          const src = typeof d.source === 'object' ? d.source.id : d.source
+          const tgt = typeof d.target === 'object' ? d.target.id : d.target
+          return src === selected || tgt === selected ? 1 : 0.08
+        })
+        .attr('stroke', (d) => {
+          if (!selected) return '#3d4658'
+          const src = typeof d.source === 'object' ? d.source.id : d.source
+          const tgt = typeof d.target === 'object' ? d.target.id : d.target
+          return src === selected || tgt === selected ? '#7aa2f7' : '#3d4658'
+        })
+        .attr('marker-end', (d) => {
+          if (!selected) return 'url(#arrowhead)'
+          const src = typeof d.source === 'object' ? d.source.id : d.source
+          const tgt = typeof d.target === 'object' ? d.target.id : d.target
+          return src === selected || tgt === selected
+            ? 'url(#arrowhead-highlight)'
+            : 'url(#arrowhead)'
+        })
+    }
+
+    nodeGroup
+      .on('mouseenter', function (event, d) {
+        event.stopPropagation()
+        hoveredNode.value = buildHoverNode(d)
+        updateHighlight(d.id)
+        d3.select(this).select('circle').attr('opacity', 1)
+      })
+      .on('mouseleave', function (_event, d) {
+        hoveredNode.value = null
+        updateHighlight(currentSelected || props.selectedId)
+      })
+      .on('click', function (event, d) {
+        event.stopPropagation()
+        updateHighlight(d.id)
+        emit('select', buildPlainNode(d))
+      })
+      .on('dblclick', function (_event, d) {
+        emit('open', buildPlainNode(d))
+      })
+
+    svg.on('click', () => {
+      currentSelected = null
+      updateHighlight(null)
+      emit('select', {} as NoteNode)
     })
-    .attr('stroke', '#1a1d24')
-    .attr('stroke-width', 1.5)
-    .attr('opacity', 0.92)
 
-  nodeGroup
-    .append('text')
-    .text((d) => d.title)
-    .attr('text-anchor', 'middle')
-    .attr('dy', (d) => -radiusScale(d.degree) - 6)
-    .attr('fill', '#c8cfdb')
-    .attr('font-size', '11px')
-    .attr('font-weight', '500')
-    .attr('pointer-events', 'none')
-    .style('text-shadow', '0 1px 2px rgba(0,0,0,0.8)')
+    simulation.on('tick', () => {
+      linkSel
+        .attr('x1', (d) => (typeof d.source === 'object' ? d.source.x ?? 0 : 0))
+        .attr('y1', (d) => (typeof d.source === 'object' ? d.source.y ?? 0 : 0))
+        .attr('x2', (d) => (typeof d.target === 'object' ? d.target.x ?? 0 : 0))
+        .attr('y2', (d) => (typeof d.target === 'object' ? d.target.y ?? 0 : 0))
 
-  function updateHighlight(selected: string | null) {
-    const connected = selected ? getConnected(selected) : null
-    nodeGroup
-      .select('circle')
-      .attr('opacity', (d) => {
-        if (!selected) return 0.92
-        return connected!.has(d.id) ? 1 : 0.15
-      })
-      .attr('stroke', (d) => (d.id === selected ? '#ffffff' : '#1a1d24'))
-      .attr('stroke-width', (d) => (d.id === selected ? 3 : 1.5))
+      nodeGroup.attr('transform', (d) => `translate(${d.x ?? 0},${d.y ?? 0})`)
+    })
 
-    nodeGroup
-      .select('text')
-      .attr('opacity', (d) => {
-        if (!selected) return 1
-        return connected!.has(d.id) ? 1 : 0.2
-      })
-
-    linkSel
-      .attr('stroke-opacity', (d) => {
-        if (!selected) return 0.6
-        const src = typeof d.source === 'object' ? d.source.id : d.source
-        const tgt = typeof d.target === 'object' ? d.target.id : d.target
-        return src === selected || tgt === selected ? 1 : 0.08
-      })
-      .attr('stroke', (d) => {
-        if (!selected) return '#3d4658'
-        const src = typeof d.source === 'object' ? d.source.id : d.source
-        const tgt = typeof d.target === 'object' ? d.target.id : d.target
-        return src === selected || tgt === selected ? '#7aa2f7' : '#3d4658'
-      })
-      .attr('marker-end', (d) => {
-        if (!selected) return 'url(#arrowhead)'
-        const src = typeof d.source === 'object' ? d.source.id : d.source
-        const tgt = typeof d.target === 'object' ? d.target.id : d.target
-        return src === selected || tgt === selected ? 'url(#arrowhead-highlight)' : 'url(#arrowhead)'
-      })
+    updateHighlight(props.selectedId)
+  } finally {
+    nextTick(() => {
+      isRendering = false
+    })
   }
-
-  nodeGroup
-    .on('mouseenter', function (event, d) {
-      hoveredNode.value = d
-      updateHighlight(d.id)
-      d3.select(this).select('circle').attr('opacity', 1)
-    })
-    .on('mouseleave', function () {
-      hoveredNode.value = null
-      updateHighlight(props.selectedId)
-    })
-    .on('click', function (event, d) {
-      event.stopPropagation()
-      updateHighlight(d.id)
-      const plainNode: NoteNode = {
-        id: d.id,
-        title: d.title,
-        path: d.path,
-        modTime: d.modTime,
-        links: d.links,
-        linkFrom: d.linkFrom,
-      }
-      emit('select', plainNode)
-    })
-    .on('dblclick', function (_event, d) {
-      const plainNode: NoteNode = {
-        id: d.id,
-        title: d.title,
-        path: d.path,
-        modTime: d.modTime,
-        links: d.links,
-        linkFrom: d.linkFrom,
-      }
-      emit('open', plainNode)
-    })
-
-  svg.on('click', () => {
-    updateHighlight(null)
-    emit('select', {} as NoteNode)
-  })
-
-  simulation.on('tick', () => {
-    linkSel
-      .attr('x1', (d) => (typeof d.source === 'object' ? d.source.x ?? 0 : 0))
-      .attr('y1', (d) => (typeof d.source === 'object' ? d.source.y ?? 0 : 0))
-      .attr('x2', (d) => (typeof d.target === 'object' ? d.target.x ?? 0 : 0))
-      .attr('y2', (d) => (typeof d.target === 'object' ? d.target.y ?? 0 : 0))
-
-    nodeGroup.attr('transform', (d) => `translate(${d.x ?? 0},${d.y ?? 0})`)
-  })
-
-  updateHighlight(props.selectedId)
 }
 
 function setupZoom() {
@@ -327,9 +382,9 @@ function onResize() {
   if (svgEl.value) {
     d3.select(svgEl.value).attr('width', width).attr('height', height)
   }
-  if (simulation) {
+  if (simulation && width > 0 && height > 0) {
     simulation.force('center', d3.forceCenter(width / 2, height / 2))
-    simulation.alpha(0.3).restart()
+    simulation.alpha(0.2).restart()
   }
 }
 
@@ -341,24 +396,32 @@ function resetView() {
     .call(zoomBehavior.transform, d3.zoomIdentity)
 }
 
+let prevDataRef: GraphData | null = null
+
 watch(
   () => props.data,
-  () => {
+  (newVal) => {
+    if (isRendering) return
+    if (newVal === prevDataRef) return
+    prevDataRef = newVal
     nextTick(() => {
       onResize()
       renderGraph()
     })
-  },
-  { deep: true }
+  }
 )
 
+let prevSelectedId: string | null = null
 watch(
   () => props.selectedId,
   (newId) => {
+    if (newId === prevSelectedId) return
+    prevSelectedId = newId
+
     if (!svgEl.value || !gNodes.value || !gLinks.value) return
     if (!props.data) return
 
-    const connected = newId ? getConnected(newId) : null
+    const connected = newId ? getConnectedLocal(newId) : null
     const gNodesSel = d3.select(gNodes.value)
     const gLinksSel = d3.select(gLinks.value)
 
@@ -383,7 +446,7 @@ watch(
     gLinksSel
       .selectAll<SVGLineElement, SimLink>('line')
       .attr('stroke-opacity', (d) => {
-        if (!newId) return 0.6
+        if (!newId) return 0.55
         const src = typeof d.source === 'object' ? d.source.id : d.source
         const tgt = typeof d.target === 'object' ? d.target.id : d.target
         return src === newId || tgt === newId ? 1 : 0.08
@@ -410,8 +473,13 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
-  if (simulation) simulation.stop()
+  if (simulation) {
+    simulation.stop()
+    simulation = null
+  }
   if (resizeObserver && container.value) resizeObserver.unobserve(container.value)
+  cachedNodes = {}
+  cachedLinks = []
 })
 
 defineExpose({ resetView })

@@ -302,13 +302,27 @@ func scanFolder(folder string) (GraphData, error) {
 		return data, err
 	}
 
+	linkFromSetMap := make(map[string]map[string]bool)
+	for id := range noteMap {
+		linkFromSetMap[id] = make(map[string]bool)
+	}
+
 	for _, note := range noteMap {
 		resolvedLinks := make([]string, 0, len(note.Links))
+		resolvedSet := make(map[string]bool)
 		for _, link := range note.Links {
 			if targetID, ok := resolveLink(link, titleToID, noteMap); ok {
+				if resolvedSet[targetID] {
+					continue
+				}
+				resolvedSet[targetID] = true
 				resolvedLinks = append(resolvedLinks, targetID)
 				if target, exists := noteMap[targetID]; exists {
-					target.LinkFrom = append(target.LinkFrom, note.ID)
+					targetLinkFromSet, _ := linkFromSetMap[targetID]
+					if !targetLinkFromSet[note.ID] {
+						targetLinkFromSet[note.ID] = true
+						target.LinkFrom = append(target.LinkFrom, note.ID)
+					}
 				}
 			}
 		}

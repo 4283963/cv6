@@ -188,7 +188,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, markRaw } from 'vue'
 import NoteGraph from './components/NoteGraph.vue'
 import { scanFolder, readNoteFile, type GraphData, type NoteNode } from './api'
 
@@ -200,6 +200,37 @@ const searchQuery = ref('')
 const loading = ref(false)
 const error = ref<string | null>(null)
 const noteContent = ref<string | null>(null)
+
+function cloneStrArr(arr: string[] | undefined): string[] {
+  if (!Array.isArray(arr)) return []
+  const out: string[] = new Array(arr.length)
+  for (let i = 0; i < arr.length; i++) out[i] = arr[i]
+  return out
+}
+
+function cloneNode(n: NoteNode): NoteNode {
+  return {
+    id: n.id,
+    title: n.title,
+    path: n.path,
+    modTime: n.modTime,
+    links: cloneStrArr(n.links),
+    linkFrom: cloneStrArr(n.linkFrom),
+  }
+}
+
+function cloneGraphData(data: GraphData): GraphData {
+  const nodes: NoteNode[] = new Array(data.nodes.length)
+  for (let i = 0; i < data.nodes.length; i++) {
+    nodes[i] = markRaw(cloneNode(data.nodes[i])) as NoteNode
+  }
+  const links = new Array(data.links.length)
+  for (let i = 0; i < data.links.length; i++) {
+    const l = data.links[i]
+    links[i] = { source: l.source, target: l.target }
+  }
+  return { nodes, links }
+}
 
 const filteredNodes = computed(() => {
   if (!graphData.value) return []
@@ -253,7 +284,7 @@ async function doScan() {
   try {
     const res = await scanFolder(currentFolder.value)
     if (res.success && res.data) {
-      graphData.value = res.data
+      graphData.value = cloneGraphData(res.data)
     } else {
       error.value = res.message || '扫描失败'
       graphData.value = null
@@ -279,12 +310,12 @@ function handleSelectNode(node: NoteNode) {
     selectedNode.value = null
     return
   }
-  selectedNode.value = node
+  selectedNode.value = cloneNode(node)
   noteContent.value = null
 }
 
 function handleOpenNode(node: NoteNode) {
-  selectedNode.value = node
+  selectedNode.value = cloneNode(node)
   handleLoadContent()
 }
 
