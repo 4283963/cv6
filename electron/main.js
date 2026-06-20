@@ -91,6 +91,27 @@ ipcMain.handle('get-server-port', () => {
   return GO_SERVER_PORT
 })
 
+ipcMain.handle('save-svg-file', async (_event, { content, defaultName }) => {
+  if (!content) {
+    return { success: false, message: 'SVG 内容为空' }
+  }
+  const safeName = (defaultName || 'note-graph.svg').replace(/[\\/:*?"<>|]/g, '_')
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: '保存 SVG 关系图',
+    defaultPath: safeName,
+    filters: [{ name: 'SVG 图片', extensions: ['svg'] }],
+  })
+  if (result.canceled || !result.filePath) {
+    return { success: false, canceled: true }
+  }
+  try {
+    fs.writeFileSync(result.filePath, content, 'utf-8')
+    return { success: true, path: result.filePath }
+  } catch (err) {
+    return { success: false, message: String(err && err.message ? err.message : err) }
+  }
+})
+
 app.whenReady().then(() => {
   startGoServer()
   createWindow()

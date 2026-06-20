@@ -38,6 +38,14 @@
           </svg>
           重置视图
         </button>
+        <button class="btn btn-accent" :disabled="!graphData || exporting" @click="handleExportSVG">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+            <polyline points="7 10 12 15 17 10"></polyline>
+            <line x1="12" y1="15" x2="12" y2="3"></line>
+          </svg>
+          {{ exporting ? '导出中...' : '导出图片' }}
+        </button>
       </div>
     </header>
 
@@ -184,6 +192,13 @@
         </div>
       </aside>
     </div>
+
+    <transition name="toast-fade">
+      <div v-if="toast.show" class="toast" :class="toast.type">
+        <span class="toast-icon">{{ toast.type === 'success' ? '✓' : '✕' }}</span>
+        <span class="toast-msg">{{ toast.message }}</span>
+      </div>
+    </transition>
   </div>
 </template>
 
@@ -200,6 +215,21 @@ const searchQuery = ref('')
 const loading = ref(false)
 const error = ref<string | null>(null)
 const noteContent = ref<string | null>(null)
+const exporting = ref(false)
+const toast = ref<{ show: boolean; message: string; type: 'success' | 'error' }>({
+  show: false,
+  message: '',
+  type: 'success',
+})
+
+let toastTimer: ReturnType<typeof setTimeout> | null = null
+function showToast(message: string, type: 'success' | 'error' = 'success') {
+  toast.value = { show: true, message, type }
+  if (toastTimer) clearTimeout(toastTimer)
+  toastTimer = setTimeout(() => {
+    toast.value.show = false
+  }, 3200)
+}
 
 function cloneStrArr(arr: string[] | undefined): string[] {
   if (!Array.isArray(arr)) return []
@@ -303,6 +333,56 @@ async function handleRefresh() {
 
 function handleResetView() {
   graphRef.value?.resetView()
+}
+
+async function handleExportSVG() {
+  if (!graphData.value || !graphRef.value) {
+    showToast('没有可导出的关系图', 'error')
+    return
+  }
+  exporting.value = true
+  try {
+    const svgString = graphRef.value.exportSVG()
+    if (!svgString) {
+      showToast('导出失败：图谱内容为空', 'error')
+      return
+    }
+
+    const folderName = currentFolder.value
+      ? currentFolder.value.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || 'notes'
+      : 'notes'
+    const stamp = new Date()
+      .toISOString()
+      .slice(0, 19)
+      .replace(/[:T]/g, '-')
+    const defaultName = `${folderName}-关系图-${stamp}.svg`
+
+    if (window.electronAPI?.saveSVGFile) {
+      const result = await window.electronAPI.saveSVGFile(svgString, defaultName)
+      if (result.success) {
+        showToast(`已保存到：${result.path}`)
+      } else if (result.canceled) {
+        // 用户取消，不提示
+      } else {
+        showToast(result.message || '保存失败', 'error')
+      }
+    } else {
+      const blob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = defaultName
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      setTimeout(() => URL.revokeObjectURL(url), 1000)
+      showToast('已通过浏览器下载 SVG 文件')
+    }
+  } catch (e: any) {
+    showToast(`导出失败：${e.message || e}`, 'error')
+  } finally {
+    exporting.value = false
+  }
 }
 
 function handleSelectNode(node: NoteNode) {
@@ -451,6 +531,65 @@ watch(selectedNode, () => {
 .btn-ghost:hover:not(:disabled) {
   background: #1d212c;
   color: #e8e8e8;
+}
+
+.btn-accent {
+  color: #ffffff;
+  background: linear-gradient(135deg, #bb9af7, #7aa2f7);
+  border-color: transparent;
+}
+
+.btn-accent:hover:not(:disabled) {
+  background: linear-gradient(135deg, #c9b3f9, #89aef9);
+  box-shadow: 0 2px 10px rgba(122, 162, 247, 0.35);
+}
+
+.toast {
+  position: fixed;
+  top: 70px;
+  right: 24px;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 18px;
+  border-radius: 8px;
+  font-size: 13px;
+  max-width: 460px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(8px);
+}
+
+.toast.success {
+  background: rgba(38, 52, 40, 0.95);
+  border: 1px solid #2d4a36;
+  color: #9ece6a;
+}
+
+.toast.error {
+  background: rgba(54, 36, 40, 0.95);
+  border: 1px solid #4a2d31;
+  color: #f7768e;
+}
+
+.toast-icon {
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.toast-msg {
+  word-break: break-all;
+}
+
+.toast-fade-enter-active,
+.toast-fade-leave-active {
+  transition: all 0.28s ease;
+}
+
+.toast-fade-enter-from,
+.toast-fade-leave-to {
+  opacity: 0;
+  transform: translateX(20px);
 }
 
 .btn-small {

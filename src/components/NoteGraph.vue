@@ -396,6 +396,57 @@ function resetView() {
     .call(zoomBehavior.transform, d3.zoomIdentity)
 }
 
+function exportSVG(): string {
+  if (!svgEl.value || !gZoom.value) return ''
+
+  const sourceSVG = svgEl.value
+  const sourceGZoom = gZoom.value
+
+  let bbox: DOMRect
+  try {
+    bbox = sourceGZoom.getBBox()
+  } catch {
+    return ''
+  }
+  if (!bbox || bbox.width === 0 || bbox.height === 0) return ''
+
+  const clone = sourceSVG.cloneNode(true) as SVGSVGElement
+  clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg')
+  clone.setAttribute('xmlns:xlink', 'http://www.w3.org/1999/xlink')
+
+  const gLinksClone = clone.querySelector('g.links')
+  const gZoomClone = (gLinksClone?.parentElement as SVGGElement | null) || null
+  if (!gZoomClone) return ''
+
+  gZoomClone.removeAttribute('transform')
+
+  const padding = 60
+  const x = bbox.x - padding
+  const y = bbox.y - padding
+  const w = bbox.width + padding * 2
+  const h = bbox.height + padding * 2
+
+  clone.setAttribute('width', String(Math.round(w)))
+  clone.setAttribute('height', String(Math.round(h)))
+  clone.setAttribute('viewBox', `${x} ${y} ${w} ${h}`)
+
+  const bgRect = document.createElementNS('http://www.w3.org/2000/svg', 'rect')
+  bgRect.setAttribute('x', String(x))
+  bgRect.setAttribute('y', String(y))
+  bgRect.setAttribute('width', String(w))
+  bgRect.setAttribute('height', String(h))
+  bgRect.setAttribute('fill', '#0f1115')
+  if (clone.firstChild) {
+    clone.insertBefore(bgRect, clone.firstChild)
+  } else {
+    clone.appendChild(bgRect)
+  }
+
+  const serializer = new XMLSerializer()
+  const svgString = serializer.serializeToString(clone)
+  return '<?xml version="1.0" encoding="UTF-8" standalone="no"?>\n' + svgString
+}
+
 let prevDataRef: GraphData | null = null
 
 watch(
@@ -482,7 +533,7 @@ onBeforeUnmount(() => {
   cachedLinks = []
 })
 
-defineExpose({ resetView })
+defineExpose({ resetView, exportSVG })
 </script>
 
 <style scoped>
